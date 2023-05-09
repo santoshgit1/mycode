@@ -1,0 +1,465 @@
+I have to do a java project, in which I have an existing code VB.NET have to convert to java code.
+
+Here is my VB.NET Code given is Realbasic Application:
+
+pSiteId = inSiteID
+  // Database objects
+  Dim rsErr As CdataSQLquery
+  Dim rsImp As CdataSQLquery
+  Dim TripDespatching as CMobileDataDespatchClient
+  
+  Dim rsSrve As CdataSQLquery
+  Dim rsLoad As CdataSQLquery
+  Dim rsCust As CdataSQLquery
+  Dim rsLoc As CdataSQLquery
+  Dim rsCont As CdataSQLquery
+  Dim rsDes as CDataSQLquery
+  
+  // Qty list with units set by service type
+  Dim tQtyList As New cQtyList
+  
+  // Key fields
+  Dim tLoadId As Variant
+  Dim tServiceId As Variant
+  Dim tServiceDate As Variant
+  
+  // Trip processing
+  Dim tLastTripId As Variant
+  Dim tLastTripSeq As Variant
+  Dim tTripId As Variant
+  Dim tTripSeq As Variant
+  Dim tNewTripId As Variant
+  
+  // General variables
+  Dim rc As Integer
+  Dim rcOk As Integer
+  Dim tUseRefInt As Boolean
+  Dim result As String
+  Dim tMinDate As date
+  Dim criteria As String
+  Dim theSql as String
+  Dim theSql1 as String
+  Dim vCreationID as Variant
+  Dim i as Integer
+  Dim tSvcChange,tSvcChangeSQL As String
+  
+  
+  Dim jobLog As CFndJobLog
+  Dim tImportedLoadID As Variant
+  Dim countTotal,countDone,countOk As Integer
+  Dim stmt As CDataBasicStmt
+  Dim NewAddedService as boolean
+  NewAddedService=False
+  // Connect databases
+  pImportDatabase = App.Session.GetCreateSQLContextForImport()
+  If pImportDatabase = Nil Then
+    App.Terminate(True, "Connection to import database failed.")
+    Return
+  End If
+  
+  //Check if a site is the Multi-leg enabled site. //according to D0105-ECR-01.01, paragraph 4.1.6.3 "All Multi-Leg Enabled Sites"
+  rsImp = New CDataSqlQuery()
+  rsImp.initWithSqlTemplate("Select count(Set1.siteid) EnSites from (SELECT SiteId_Owner SiteId From AXIOMIMP.Multileg_sites UNION "+_
+  "SELECT SiteID_Selectable Siteid From AXIOMIMP.MultiLEg_Sites) Set1 where Set1.SiteId=%%SITEID%%", "SITEID",inSiteID)
+  pIsMultileg=False
+  if (rsImp.EnSites>0) then
+    pIsMultileg=True
+  end if
+  if inMultiLegOnly and not(pIsMultileg) then
+    App.Terminate(True, "Non-multi-leg-enabled site can not be processed in the multi-leg process (IM1).")
+    Return
+  end if
+  
+  
+  // Init logging
+  jobLog = New CFndJobLog
+  
+  // Initalize queries
+  rsErr = New CDataSqlQuery
+  rsImp = New CDataSqlQuery
+  rsSrve = New CDataSqlQuery
+  rsLoad = New CDataSqlQuery
+  rsCust = New CDataSqlQuery
+  rsLoc = New CDataSqlQuery
+  rsCont = New CDataSqlQuery
+  
+  // Begin
+  pLastTripNo = Nil
+  tServiceID=Nil
+  
+  // Cache system settings
+  tUseRefInt = App.Options.GetSwitch("ReferenceInterface")
+  
+  // Open import file
+  //ignoring the date
+  'theSql="SELECT * FROM AXIOMIMP.IMP_SERVICE WHERE SiteId=%%SITE%% AND ServiceDate>=%%DATE%% AND Imported=0 "
+  //For Oracle
+  'rsImp = New CDataSqlQuery()
+  'theSql="SELECT * FROM AXIOMIMP.IMP_SERVICE WHERE SiteId=%%SITE%% AND Imported=0 "
+  //For MySQL
+  'rsImp = New CDataSqlQuery(App.ImportDB)
+  rsImp = New CDataSqlQuery(pImportDatabase)
+  theSql="SELECT UPPER(CustomerId) CustomerId,UPPER(ServiceNo) ServiceNo,UPPER(LoadNo) LoadNo," + _
+  "UPPER(TripNo) TripNo,UPPER(ContainerId) ContainerId,UPPER(ContainerType_Cont) ContainerType_Cont," + _
+  "UPPER(LoadType) LoadType," + _
+  "UPPER(LocationId_Pickup) LocationId_Pickup,UPPER(LocationId_Drop) LocationId_Drop," + _
+  "UPPER(LocationId_Load) LocationId_Load,UPPER(LocationId_Finish) LocationId_Finish," + _
+  "UPPER(LocationType_Drop) LocationType_Drop,UPPER(LocationType) LocationType," + _
+  "UPPER(MapSourceId_Drop) MapSourceId_Drop,UPPER(MapSourceId) MapSourceId," + _
+  "UPPER(RouteId_Drop) RouteId_Drop,UPPER(RouteId_Pickup) RouteId_Pickup,UPPER(ServiceType) ServiceType," + _
+  "UPPER(TrailerID) TrailerID,UPPER(TrailerID_Tag) TrailerID_Tag,UPPER(TruckId) TruckId," + _
+  "UPPER(ChargeZoneId_Drop) ChargeZoneId_Drop,UPPER(ChargeZoneId) ChargeZoneId," + _
+  "UPPER(PayZoneId_Drop) PayZoneId_Drop,UPPER(PayZoneId) PayZoneId," + _
+  "UPPER(Unit1) Unit1,UPPER(Unit2) Unit2,UPPER(Unit3) Unit3,UPPER(Unit4) Unit4," + _
+  "UPPER(Unit5) Unit5,UPPER(Unit6) Unit6,UPPER(Unit7) Unit7,UPPER(Unit8) Unit8," + _
+  "I.* FROM IMP_SERVICE I WHERE SiteId=%%SITE%% AND Imported=0"
+  
+  
+  if inMultiLegOnly then
+    //applying a rule for MultiLeg import process only. According to D0105-ECR-01.01, paragraph 4.1.6.1 "Import only multi-leg trips" if the command is IM1
+    theSql=theSql+" AND OriginSite is Not Null AND OriginLoc is Not Null"
+  end if
+  theSql=theSql+ " ORDER BY TripNo,TripSeq,ImportId "
+  //ignorign the date 
+  //rsImp.initWithSqlTemplate(theSql, "SITE", inSiteId, "DATE", inMinDate)
+  rsImp.initWithSqlTemplate(theSql, "SITE", inSiteId)
+  countTotal = rsImp.RecordCount
+  
+  App.Status("Importing load schedule...", 0)
+  pCreationID=New Dictionary
+  pDespatchTrip=New Dictionary
+  While Not rsImp.EOF
+    
+    jobLog.ResetRecent
+    jobLog.Notice("Importing row "+rsImp.ImportID)
+    
+    pNew_DriverId = Nil
+    pNew_TrailerId = Nil
+    pNew_TrailerId_Tag = Nil
+    pNew_TruckId = Nil
+    
+    // VERIFY SERVICE PROCESSING OPTION
+    Select Case NVL(rsImp.ValidateService, kValidationModeExist)
+    Case kValidationModeNotExist,kValidationModeAmcor
+    Case kValidationModeExist
+      If IsNull(rsImp.ImportServiceId) Then
+        jobLog.Error("Service frequired for routing")
+        GoTo Reject_Record
+      End If
+    Else
+      jobLog.Error("Service validation; unknown validation mode: "+rsImp.ValidateService)
+      GoTo Reject_Record
+    End Select
+    
+    // VERIFY REFERENCE VALUES
+    If Not mValidCustomer(jobLog, "Customer", rsImp.ValidateCustomer, rsImp.CustomerID) Then GoTo Reject_Record
+    If Not mValidColumnValue(jobLog, "Load Type", rsImp.ValidateLoadType, "LOAD_TYPE", "LoadTypeID", rsImp.LoadType) Then GoTo Reject_Record
+    If Not mValidColumnValue(jobLog, "Location", rsImp.ValidatePickup, "LOCATION", "LocationID", rsImp.LocationId_Pickup) Then GoTo Reject_Record
+    If Not mValidColumnValue(jobLog, "Truck", rsImp.ValidateTruck, "TRUCK", "TruckID", rsImp.TruckID) Then GoTo Reject_Record
+    If Not mValidColumnValue(jobLog, "Trailer", rsImp.ValidateTrailer, "TRAILER", "TrailerID", rsImp.TrailerID) Then GoTo Reject_Record
+    If Not mValidColumnValue(jobLog, "Tag Trailer", rsImp.ValidateTrailerTag, "TRAILER", "TrailerID", rsImp.TrailerId_Tag) Then GoTo Reject_Record
+    If Not mValidDriver(jobLog, rsImp, pNew_DriverId) Then GoTo Reject_Record
+    
+    
+    // Validate Units
+    Call mValidColumnValue(jobLog, "Unit (1)", kValidationModeCreate, "UNIT", "UnitID", rsImp.Unit1)
+    Call mValidColumnValue(jobLog, "Unit (2)", kValidationModeCreate, "UNIT", "UnitID", rsImp.Unit2)
+    Call mValidColumnValue(jobLog, "Unit (3)", kValidationModeCreate, "UNIT", "UnitID", rsImp.Unit3)
+    Call mValidColumnValue(jobLog, "Unit (4)", kValidationModeCreate, "UNIT", "UnitID", rsImp.Unit4)
+    Call mValidColumnValue(jobLog, "Unit (5)", kValidationModeCreate, "UNIT", "UnitID", rsImp.Unit5)
+    Call mValidColumnValue(jobLog, "Unit (6)", kValidationModeCreate, "UNIT", "UnitID", rsImp.Unit6)
+    Call mValidColumnValue(jobLog, "Unit (7)", kValidationModeCreate, "UNIT", "UnitID", rsImp.Unit7)
+    Call mValidColumnValue(jobLog, "Unit (8)", kValidationModeCreate, "UNIT", "UnitID", rsImp.Unit8)
+    If jobLog.RecentErrorCount <> 0 Then GoTo Reject_Record // this is based on previous records errors
+    
+    // PROCESS SERVICE TYPE DATA
+    mVerifyServiceType(jobLog, rsImp, tQtyList)
+    If jobLog.RecentErrorCount <> 0 Then GoTo Reject_Record
+    
+    // PROCESS CONTAINER DATA
+    mVerifyContainer(jobLog, rsImp)
+    If jobLog.RecentErrorCount <> 0 Then GoTo Reject_Record
+    
+    // PROCESS DROP LOCATION DATA
+    mVerifyLocation(jobLog, True, rsImp)
+    If jobLog.RecentErrorCount <> 0 Then GoTo Reject_Record
+    
+    // PROCESS PICKUP LOCATION DATA
+    mVerifyLocation(jobLog, False, rsImp)
+    If jobLog.RecentErrorCount <> 0 Then GoTo Reject_Record
+    
+    // VALIDATE LOAD NO
+    tLoadId=Nil
+    if rsImp.ValidateLoad=kValidationModeAmcor then
+      tImportedLoadID=Nil
+      mVerifyMLLoadNo(jobLog,rsImp,tLoadId,tImportedLoadID)
+    else 
+      tImportedLoadID = Nil
+      mVerifyLoadNo(jobLog, rsImp, tLoadId, tImportedLoadID)
+    end if
+    If jobLog.RecentErrorCount <> 0 Then GoTo Reject_Record
+    
+    
+    // VALIDATE SERVICE FIELDS
+    
+    ' Check Service Date
+    If IsNull(tMinDate) Then
+      tServiceDate = rsImp.ServiceDate
+    ElseIf IsNull(rsImp.ServiceDate) Then
+      tServiceDate = tMinDate
+    ElseIf rsImp.ServiceDate < tMinDate Then
+      tServiceDate = tMinDate
+    Else
+      tServiceDate = rsImp.ServiceDate
+    End If
+    
+    If IsNull(tServiceDate) Then
+      jobLog.Error("Missing service date")
+      Goto Reject_Record
+    End If
+    
+    tServiceDate = OnlyDate(tServiceDate)
+    
+    // VALIDATE TRIP ID
+    if rsImp.ValidateTrip=kValidationModeRecycle then
+      //according to D0105-ECR-01.01, paragraph 4.1.4.3 "Recycle Trip Validation Mode"
+      if mVerifyTripRecycle(jobLog, rsImp, tLastTripId, tLastTripSeq, tTripId, tTripSeq, tNewTripId, tServiceDate)=0 then
+        //Create New Trip
+        mVerifyTrip(jobLog, rsImp, tLastTripId, tLastTripSeq, tTripId, tTripSeq, tNewTripId, tServiceDate)
+      else
+        ///??? What should it be updated?
+      end if
+      
+    else
+      mVerifyTrip(jobLog, rsImp, tLastTripId, tLastTripSeq, tTripId, tTripSeq, tNewTripId, tServiceDate)
+    end if
+    If jobLog.RecentErrorCount <> 0 Then GoTo Reject_Record
+
+
+// PROCESS THE SERVICE RECORD
+    Select Case rsImp.ValidateService
+    Case kValidationModeNotExist
+      // ADD A NEW SERVICE RECORD (RELY ON THE ERROR HANDLING TO AVOID DUPLICATES)
+      stmt = New CDataBasicStmt
+      stmt.ServiceNo = NVL(rsImp.ServiceNo, GetNextId("SERVICE", FndDefaultSQLContext.GetConnection, "axiom"))
+      
+      thesql=stmt.ServiceNo
+      stmt.ServiceGroup = rsImp.ServiceGroup
+      stmt.LoadId = tLoadId
+      stmt.ServiceDate = OnlyDate(tServiceDate)
+      stmt.ServiceTypeID = rsImp.ServiceType
+      stmt.ServiceDesc = Left(rsImp.ServiceDesc,80)
+      stmt.CustomerId = rsImp.CustomerId
+      stmt.LoadTypeID = rsImp.LoadType
+      'stmt.DriverId = rsImp.DriverId
+      stmt.DriverId = pNew_DriverId
+      'stmt.TruckId = rsImp.TruckId
+      'stmt.TrailerId = rsImp.TrailerId
+      'stmt.TrailerId_Tag = rsImp.TrailerId_Tag
+      //D1239-ECR-01.00
+      stmt.Truckid = pNew_TruckId
+      stmt.TrailerId = pNew_TrailerId
+      stmt.TrailerId_Tag = pNew_TrailerId_Tag
+      
+      stmt.ContainerId = rsImp.ContainerId
+      stmt.LocationId_Pickup = rsImp.LocationId_Pickup
+      stmt.LocationId_Drop = rsImp.LocationId_Drop
+      tQtyList.WriteToStmt(stmt, False)
+      stmt.Docket = rsImp.Docket
+      stmt.TripId = tTripId
+      stmt.TripSeq = tTripSeq
+      stmt.Remarks = rsImp.Remarks_Service
+      stmt.Delivered = rsImp.Delivered
+      If App.Options.GetSwitch("Import.UseDeliveryWindow") Then
+        mSetDeliveryWindowStmt(stmt, rsImp.LocationId_Drop, rsImp.LoadType, rsImp.ServiceType, rsImp.ServiceDate, rsImp.LocationId_Pickup, _
+        rsImp.CustomerId)
+      Else
+        stmt.Window1From = rsImp.Window1From
+        stmt.Window1To = rsImp.Window1To
+        stmt.Window2From = rsImp.Window2From
+        stmt.Window2To = rsImp.Window2To
+      End if
+      
+      stmt.EnteredBy = rsImp.ImportEnteredBy
+      stmt.Siteid=rsImp.SiteID
+      
+      stmt.IDGenerator = "SERVICE_SEQ"
+      If Not stmt.Insert("SERVICE", "ID") Then
+        jobLog.Error("Couldn't create new service; SQL error: "+stmt.ErrorMessage)
+        GoTo Reject_Record
+      End If
+      tServiceId = stmt.InsertID
+      NewAddedService=True
+      Call mMakeNotification("Service Imported","Service " + stmt.ServiceNo + " was imported into the Axiom site",App.Session.GetSiteID(),"Service Imported","B2B Import")
+      If tTripId <> Nil Then MAxiomDataMethods.ADM_CacheTripContentAggs(tTripId)
+      
+    Case kValidationModeExist
+      // FIND THE ROUTING DETAILS FOR THE SERVICE
+      tServiceId = rsImp.ImportServiceId
+      
+      rsSrve = New CDataSqlQuery
+      rsSrve.InitWithSQLTemplate("SELECT * FROM SERVICE WHERE ID=%%SERVICE%%", "SERVICE", tServiceId)
+      
+      If rsSrve.EOF Then
+        jobLog.Error("Service not found")
+        GoTo Reject_Record
+      End If
+      
+      // UPDATE THEM IF THEY ARE FOUND
+      theSQL = "UPDATE SERVICE SET "+ _
+      "TripId = %%TRIPID%%, TripSeq = %%SEQ%%, ServiceDesc = %%DESC%%, "+ _
+      "Window1From = %%1F%%, Window1To = %%1T%%, Window2From = %%2F%%, Window2To = %%2T%% "
+      
+      If Not IsNull(rsSrve.Qty1) Then theSql = theSql + ", Qty1=%%QTY1%% "
+      If Not IsNull(rsSrve.Qty2) Then theSql = theSql + ", Qty2=%%QTY2%% "
+      If Not IsNull(rsSrve.Qty3) Then theSql = theSql + ", Qty3=%%QTY3%% "
+      If Not IsNull(rsSrve.Qty4) Then theSql = theSql + ", Qty4=%%QTY4%% "
+      If Not IsNull(rsSrve.Qty5) Then theSql = theSql + ", Qty5=%%QTY5%% "
+      If Not IsNull(rsSrve.Qty6) Then theSql = theSql + ", Qty6=%%QTY6%% "
+      If Not IsNull(rsSrve.Qty7) Then theSql = theSql + ", Qty7=%%QTY7%% "
+      If Not IsNull(rsSrve.Qty8) Then theSql = theSql + ", Qty8=%%QTY8%% "
+      
+      
+      theSql = theSQL + " WHERE ID=%%SERVICE%%"
+      
+      If Not ExecuteSQLtemplate(theSQL,"TRIPID",tTripId,"SEQ",tTripSeq,"DESC",rsImp.Remarks_Service,"1F",rsImp.Window1From,"1T",rsImp.Window1To,_
+        "2F",rsImp.Window2From,"2T",rsImp.Window2To,"SERVICE",tServiceId, "PST", rsImp.PlannedStartTime, "PET", rsImp.PlannedEndTime, _
+        "QTY1", rsImp.Qty1, "QTY2", rsImp.Qty2, "QTY3", rsImp.Qty3, "QTY4", rsImp.Qty4, "QTY5", rsImp.Qty5, "QTY6", rsImp.Qty6, "QTY7", rsImp.Qty7, "QTY8", rsImp.Qty8) Then
+        jobLog.Error("Couln't update service")
+        GoTo Reject_Record
+      End
+      
+      If tTripId<>Nil Then
+        theSql = "UPDATE TRIP SET "
+        If Not Bool(rsSrve.Delivered) Then
+          theSql = theSql + "PlannedStartTime=%%PST%%, PlannedFinishTime=%%PET%% "
+        End If
+        theSql = theSql + " WHERE ID=%%TRIP%%"
+        
+        If Not ExecuteSqlTemplate(theSql, "TRIP", tTripId, "PST", rsImp.PlannedStartTime, "PET", rsImp.PlannedEndTime) Then
+          jobLog.Error("Couln't update trip")
+          GoTo Reject_Record
+        End
+        
+        
+        If tTripId <> Nil Then MAxiomDataMethods.ADM_CacheTripContentAggs(tTripId)
+      End If
+    CASE kValidationModeAmcor
+      // FIND THE ROUTING DETAILS FOR THE SERVICE
+      //according to D0105-ECR-01.01, paragraph 4.1.4.2. "New validation mode"
+      if tLoadid<>Nil then
+        theSql="Select L.*, nvl(CM.Customerid,'NOCUSTOMER') AS CUSTOMERID from CustLoad L left join Consignment_master CM on CM.Id=L.MasterID and CM.SiteID_ORigin=L.SiteID "+_
+        " where L.SiteID=%%SITEID%% and L.id=%%LOADID%%"
+        
+        theSql1="Select Set1.* , s.id as serviceid, S.Complete ServiceComplete,T.Despatch,S.* from SERVICE S LEFT JOIN TRIP T ON T.ID=S.TRIPID AND T.SITEID=S.SITEID, "+_
+        "("+theSql+") Set1 where S.SiteID=Set1.SiteId and S.LoadId=Set1.ID"
+        rsSrve=New CdataSqlQuery
+        rsSrve.InitWithSQLTemplate(theSql1,"SITEID", rsImp.SiteID,"LOADID",Format(tLoadId,"0"),"LOCDROP", rsImp.LocationId_Drop)
+        if  rsSrve.Eof then
+          //create new service for existing load
+          tServiceID=mCreateNewService(rsImp,tServiceDate,tLoadId, tTripId,tTripSeq,tQtyList)
+          if tServiceID=-1 then
+            jobLog.Error("Couln't create new service; SQL error: "+stmt.ErrorMessage)
+            GoTo Reject_Record
+          end if
+        elseif Bool(rsSrve.ServiceComplete) Then
+          jobLog.Error("Couln't update service, it's complete")
+          Call mMakeNotification("Service cannot be updated","Service "+rsSrve.ServiceNo + " could not be updated because it has been completed.",App.Session.GetSiteID,"Service Import Failed","B2B Import")
+          GoTo Reject_Record
+        Else
+          rsSrve.moveFirst
+          theSql1="Select Set1.* ,s.id as serviceid, S.* from SERVICE S LEFT JOIN TRIP T ON T.ID=S.TRIPID AND T.SITEID=S.SITEID, "+_
+          "("+theSql+") Set1 where S.SiteID=Set1.SiteId and S.LoadId=Set1.ID and "+_
+          " (NVL(%%LOCPICKUP%%,'NULLVALUE')=NVL(S.LOCATIONID_PICKUP,'NULLVALUE') or "+_
+          " NVL(%%LOCPICKUP%%,'NULLVALUE')='NULLVALUE')"
+          rsSrve=New CdataSqlQuery
+          rsSrve.InitWithSQLTemplate(theSql1,"SITEID", rsImp.SiteID,"LOADID",Format(tLoadId,"0"),"LOCDROP", rsImp.LocationId_Drop, "LOCPICKUP",rsImp.Locationid_Pickup)
+          if rsSrve.eof then
+            // create new service for existing load
+            tServiceId=mCreateNewService(rsImp,tServiceDate,tLoadId, tTripId,tTripSeq,tQtyList)
+            if tServiceId=-1 then
+              jobLog.Error("Couldn't create new service; SQL error: "+stmt.ErrorMessage)
+              GoTo Reject_Record
+            else
+              NewAddedService=True
+            end if
+            
+          else
+            
+            //update existing service & notify changes
+            tServiceId=rsSrve.ServiceId
+            mUpdateService(jobLog,rsImp,rsSrve,tServiceId,tTripid, tTripSeq)
+            If jobLog.RecentErrorCount <> 0 Then GoTo Reject_Record
+          end if
+        end if
+        
+      End If
+    End Select
+    
+    
+    // Add return to base leg
+    if tLoadId<>nil and NewAddedService then
+      vCreationID=mGetCreationID(rsImp)
+      if vCreationID<> Nil then
+        pCreationID.value(tServiceId)=vCreationID
+      end if
+    end if 
+    'mAddReturnLeg(tTripId, rsImp, tLoadId)
+    
+    //auto despatching...D0105-ECR-01.01, paragraph 4.1.7.2 "Automatic Despatch. Decision Table" 
+    if inAutoDespatch then
+      if tLoadId<>Nil and tTripId <> Nil then
+        if mWillDespatch(jobLog,tLoadId,rsImp)<>  nil  then
+          pDespatchTrip.value(tTripId)=tTripId
+        end if
+      end if
+    end if
+    
+    
+    // Update status
+    If Not ExecuteSQLTemplate(pImportDatabase.GetConnection,"UPDATE IMP_SERVICE SET Imported=-1, ImportServiceId=%%SERVICE%% WHERE ImportId=%%IMPID%%", _
+      "SERVICE", tServiceId, "IMPID", rsImp.ImportId, "ImportedLoadID", tImportedLoadID) Then
+      jobLog.Error("Couldn't update status of import record")
+      GoTo Reject_Record
+    End If
+    countOk = countOk+1
+    
+    
+    // Record error handling
+    'trans.Commit
+    'trans = Nil
+    GoTo Next_Record
+    Reject_Record:
+    'trans = Nil // ensure we don't rollback changes to reflect error/status!
+    mRejectRecord(jobLog, rsImp.ImportId)
+    Next_Record:
+    
+    // Record progress tracking
+    countDone = countDone+1
+    'SetGlobalProgress(countDone / countTotal * 100)
+    rsImp.MoveNext
+  Wend
+  
+  // Add return to base leg
+  'mAddReturnLeg("**END**", Nil, Nil)
+  //according to D0105-ECR-01.01, paragraph 4.1.1.2 "Return Logistics" 
+  For i=0 to pCreationID.Count-1
+    mAddReturnLegs(jobLog,pCreationID.Key(i),pCreationID.Value(pCreationID.Key(i)))
+  next i
+  
+  For i=0 to pDespatchTrip.Count-1
+    TripDespatching=New CMobileDataDespatchClient(MFoundation.DefaultDatabase,"axiom",CStr(pSiteId))
+    // D0105-ECR-01.01, paragraph 4.1.7.1 "Automatic Despatch. Valid Trips" 
+    if mTripValidForDespatch(Format(pDespatchTrip.Key(i),"0"))=1 then
+      call TripDespatching.DespatchTrip(Format(pDespatchTrip.Key(i),"0"))
+      mDespatchTrip(pDespatchTrip.Key(i))
+      MAxiomDataMethods.ADM_CacheTripStatus(pDespatchTrip.Key(i))
+    end if
+  next i 
+  
+  
+  // Results
+  App.Status("Import finished.", 100)
+  jobLog.Notice(Format(countDone,"0")+" records processed. "+Format(countOk,"0")+" services created successfully.")
+  If rsImp.RecordCount>0 Then Call mMakeNotification("Services Imported","Services were imported into the Axiom site",App.Session.GetSiteID(),"Import Complete","B2B Import")
+  pImportDatabase = Nil
